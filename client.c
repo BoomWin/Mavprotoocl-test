@@ -1,9 +1,12 @@
+
+#include <sys/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include "./c_library_v2-master/common/mavlink.h"
+#include "c_library_v2-master/mavlink_types.h"
 
 
 #define SERVER_IP   "127.0.0.1" // 자신 IP
@@ -25,6 +28,10 @@ int main() {
     server_addr.sin_port = htons(SERVER_PORT);
     server_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
 
+    // sign 기능 추가하기 위해서 구조체 선언
+    mavlink_signing_t signing;
+    mavlink_signing_streams_t signing_streams;
+
     printf("[CLIENT] Vehicle (sysid = 1) 시작, 서버 %s:%d로 HEARTBEAT 전송\n", SERVER_IP, SERVER_PORT);
 
     // 3) 메인 루프 : 1초마다 HEARTBEAT 송신 + 서버 응답 수신
@@ -33,12 +40,38 @@ int main() {
         mavlink_message_t msg;
         uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 
+        // 2) 비밀 키 설정 (32 바이트 - 양쪽이 동일한 키를 사용해야 함)
+        memset(&signing, 0, sizeof(signing));
+        // 현재 임시 키
+        uint8_t secret_key[32] = {
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20
+        };
+        memcpy(signing.secret_key, secret_key, 32);
+
+        // 3) 플래그, link_id, 타임스탬프 설정
+        // 사용하기 위해서 해당 플래그 필요함.
+        signing.flags = MAVLINK_SIGNING_FLAG_SIGN_OUTGOING;
+        signing.link_id = 0;
+
+        // 서명 생성에 사용될 타임 스탬프 값
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        signing.timestamp = (uint64_t)tv.tv_sec * 1000000ULL + tv.tv_usec;
+
+        // 4) 채널의 status에 등록
+        mavlink_status_t *status = mavlink_get_channel_status(MAVLINK_COMM_0);
+        status->signing = &signing;
+        status->signing_streams = &signing_streams;
+
         // HEARTBEAT 패킹 : sysid=1, compid=1 (Vehicle)
         mavlink_msg_heartbeat_pack(
             1,                      // system_id (Vehicle)
             1,                      // component_id
             &msg,
-            MAV_TYPE_QUADROTOR,      // type: 쿼드 콥터터
+            MAV_TYPE_QUADROTOR,      // type: 쿼드 콥터
             MAV_AUTOPILOT_GENERIC,   // autopilot: 일반 자동조종 장치
             MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, // base_mode: 사용자 모드 활성화
             0,                        // custom_mode: 사용자 모드 0
