@@ -34,37 +34,39 @@ int main() {
 
     printf("[CLIENT] Vehicle (sysid = 1) 시작, 서버 %s:%d로 HEARTBEAT 전송\n", SERVER_IP, SERVER_PORT);
 
+
+    // 비밀 키 설정 (32 바이트 - 양쪽이 동일한 키를 사용해야 함)
+    memset(&signing, 0, sizeof(signing));
+    // 현재 임시 키
+    uint8_t secret_key[32] = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20
+    };
+    memcpy(signing.secret_key, secret_key, 32);
+    
+    // 플래그, link_id, 타임스탬프 설정
+    // 사용하기 위해서 해당 플래그 필요함.
+    signing.flags = MAVLINK_SIGNING_FLAG_SIGN_OUTGOING;
+    signing.link_id = 0;
+
+    // 채널의 status에 등록
+    mavlink_status_t *status = mavlink_get_channel_status(MAVLINK_COMM_0);
+    status->signing = &signing;
+    status->signing_streams = &signing_streams;
+
+
     // 3) 메인 루프 : 1초마다 HEARTBEAT 송신 + 서버 응답 수신
     while (1) {
         // 송신 부분
         mavlink_message_t msg;
         uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 
-        // 2) 비밀 키 설정 (32 바이트 - 양쪽이 동일한 키를 사용해야 함)
-        memset(&signing, 0, sizeof(signing));
-        // 현재 임시 키
-        uint8_t secret_key[32] = {
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20
-        };
-        memcpy(signing.secret_key, secret_key, 32);
-
-        // 3) 플래그, link_id, 타임스탬프 설정
-        // 사용하기 위해서 해당 플래그 필요함.
-        signing.flags = MAVLINK_SIGNING_FLAG_SIGN_OUTGOING;
-        signing.link_id = 0;
-
         // 서명 생성에 사용될 타임 스탬프 값
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        signing.timestamp = (uint64_t)tv.tv_sec * 1000000ULL + tv.tv_usec;
-
-        // 4) 채널의 status에 등록
-        mavlink_status_t *status = mavlink_get_channel_status(MAVLINK_COMM_0);
-        status->signing = &signing;
-        status->signing_streams = &signing_streams;
+        struct timeval tv_for_sign;
+        gettimeofday(&tv_for_sign, NULL);
+        signing.timestamp = (uint64_t)tv_for_sign.tv_sec * 1000000ULL + tv_for_sign.tv_usec;
 
         // HEARTBEAT 패킹 : sysid=1, compid=1 (Vehicle)
         mavlink_msg_heartbeat_pack(

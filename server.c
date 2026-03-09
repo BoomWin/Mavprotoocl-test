@@ -8,6 +8,13 @@
 
 #define LISTEN_PORT 14550
 
+// 서명 없는 패킷 처리 어떻게 할지
+// 서명 없는 패킷 거부 (1 = 허용, 0 = 거부)
+static int accept_unsigned(const mavlink_status_t *status, uint32_t msgid) {
+    // 모든 unsigned 패킷은 거부.
+    return 0;
+}
+
 int main(void) {
     // 1) UDP 소켓 생성
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -29,7 +36,30 @@ int main(void) {
         return 1;
     }
 
+    // 검증을 위한 필요 변수 선언
+    mavlink_signing_t signing;
+    mavlink_signing_streams_t signing_streams;
+
+    // 클라이언트와 동일한 키를 맞춰줘야함 그래서 어쨌든 이러한 서명을 생성하기 위해서도 키가 필요하다는뜻임 (키교환 구현 , then 개체 인증도 구현 필요)
+    memset(&signing, 0, sizeof(signing));
+    // client와 동일한 키로 구성. (현재는 임시)
+    uint8_t secret_key[32] = {                                                                                                                    
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,                                                                                           
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,                                                                                           
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,                                                                                           
+        0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20                                                                                            
+    }; 
+    memcpy(signing.secret_key, secret_key, 32);
+
     printf("[SERVER] GCS (sysid=255) 포트 %d에서 대기 중 ...\n", LISTEN_PORT);
+
+
+    // signing 컨텍스트를 채널에 등록
+    signing.accept_unsigned_callback = accept_unsigned;
+
+    mavlink_status_t *ch_status = mavlink_get_channel_status(MAVLINK_COMM_0);
+    ch_status->signing = &signing;
+    ch_status->signing_streams = &signing_streams;
 
     // 3) 수신 루프
     while (1) {
@@ -44,9 +74,11 @@ int main(void) {
         // 4) MAVLink 파싱 : 바이트 단위 루프
         mavlink_message_t msg;
         mavlink_status_t status;
+  
         for (int i = 0; i < recv_len; i++) {
+            // 1= 정상처리, 0=무언가잘못됨
             if (mavlink_parse_char(MAVLINK_COMM_0, recv_buf[i], &msg, &status)) {
-
+            
                 printf("[SERVER] 메시지 수신 : msgid=%d, sysid=%d, compid=%d (from %s:%d)\n",
                         msg.msgid, msg.sysid, msg.compid, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
                 
@@ -75,6 +107,13 @@ int main(void) {
                     uint16_t len = mavlink_msg_to_send_buffer(send_buf, &reply);
                     sendto(sock, send_buf, len, 0, (struct sockaddr*)&client_addr, client_len);
                     printf("[SERVER] HEARTBEAT 응답 전송 (seq=%d)\n", reply.seq);
+                }
+            }
+            // 정상 수행이 안될때 시그니처 오류인지에 대해서 체크하기 위해구현
+            else {
+                // status를 사용해서 어떤 부분에서의 동작이 이슈였는지 체크할 수 있음.
+                if (status.flags & MAVLINK_STATUS_FLAG_IN_BADSIG) {
+                    printf("[SERVER] 서명 검증 실패 ! 패킷 무시 \n");
                 }
             }
         }
