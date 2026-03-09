@@ -80,6 +80,128 @@ STX(1) | LEN(1) | INCOMPAT(1) | COMPAT(1) | SEQ(1) | SYSID(1) | COMPID(1) | MSGI
 
 ---
 
+## 라이브러리 아키텍처: Header-Only
+
+- 모든 코드가 `.h` 파일에 `static inline` 또는 `MAVLINK_HELPER`로 정의됨
+- 별도 `.c` 파일 없음 — `#include`하면 컴파일러가 직접 삽입
+- 따라서 빌드 시 `-I` 경로만 잡아주면 됨 (라이브러리 컴파일 불필요)
+
+---
+
+## 메시지 구조 이해
+
+- 모든 메시지(HEARTBEAT, COMMAND_LONG, GPS 등)는 **동일한 헤더 구조** 사용
+- 메시지마다 달라지는 것은 **MSGID**와 **PAYLOAD** 뿐
+- common dialect에 **총 231개** 메시지 정의됨 (`common/mavlink_msg_*.h`)
+
+### 주요 MSGID
+
+| MSGID | 이름 | payload 내용 |
+|-------|------|-------------|
+| 0 (0x00) | `HEARTBEAT` | 기체 타입, 상태 (9바이트) |
+| 1 | `SYS_STATUS` | 배터리, 센서 상태 |
+| 24 | `GPS_RAW_INT` | GPS 위치, 위성 수 |
+| 30 | `ATTITUDE` | roll, pitch, yaw |
+| 33 | `GLOBAL_POSITION_INT` | 위도, 경도, 고도 |
+| 76 (0x4C) | `COMMAND_LONG` | 명령 전송 (이륙, 착륙 등) |
+| 77 | `COMMAND_ACK` | 명령 응답 |
+| 253 | `STATUSTEXT` | 텍스트 메시지 |
+
+---
+
+## 송신 내부 호출 체인 (코드 추적 완료)
+
+```
+mavlink_msg_heartbeat_pack()           ← payload만 msg에 복사
+  └→ mavlink_finalize_message()        ← 래퍼 (mavlink_helpers.h:306)
+       └→ mavlink_finalize_message_chan()    ← 채널에서 status 꺼냄 (:296)
+            └→ mavlink_finalize_message_buffer()  ← ★ 실제 작업 (:227)
+                 1. 헤더 필드 채움 (STX, LEN, SEQ++, SYSID, COMPID, MSGID)
+                 2. CRC 계산: crc_calculate(헤더-STX제외) + payload + crc_extra
+                 3. msg->checksum에 저장
+                 4. 서명 (signing 설정된 경우만)
+
+mavlink_msg_to_send_buffer(buf, &msg)  ← msg → 전송용 byte[] 직렬화 (mavlink_helpers.h:451)
+  - 헤더 바이트 배열로 복사
+  - payload 복사
+  - msg->checksum에서 ck[0], ck[1] 복사 (mavlink_ck_a/b는 미사용, 레거시)
+  - 서명 복사 (있는 경우)
+```
+
+### `_mav_put_uint32_t` 등 매크로 (protocol.h:145~176)
+- payload 버퍼의 특정 오프셋에 값을 Little-endian으로 쓰는 매크로
+- 플랫폼에 따라 3가지 분기: byte_swap (Big-endian), byte_copy (비정렬), 직접 대입 (x86)
+
+---
+
+## CRC 상세
+
+- `mavlink_ck_a` / `mavlink_ck_b` (mavlink_types.h:161~162): payload 뒤 메모리에 CRC 저장하는 레거시 매크로
+- 실제 전송 시에는 `msg->checksum` 필드에서 직접 쪼개서 사용 (mavlink_helpers.h:485~486)
+- `crc_extra`: 메시지별 고유 상수 (HEARTBEAT=50). 송수신 측 메시지 구조 일치 검증용
+
+---
+
+## 서명 (Signing)
+
+### 서명 활성화 조건 (mavlink_helpers.h:232)
+```c
+bool signing = (!mavlink1)
+            && status->signing                                        // NULL이면 비활성
+            && (status->signing->flags & MAVLINK_SIGNING_FLAG_SIGN_OUTGOING);
+```
+- 기본값: `status->signing == NULL` → 모든 메시지에서 서명 꺼짐
+- HEARTBEAT라서 서명 안 되는 게 아님 — 채널 레벨 설정
+
+### 서명 등록 방법
+```c
+mavlink_signing_t signing;
+mavlink_signing_streams_t signing_streams;
+
+memset(&signing, 0, sizeof(signing));
+// 32바이트 비밀 키 (서버/클라이언트 동일해야 함)
+uint8_t secret_key[32] = { 0x01, 0x02, ... , 0x20 };
+memcpy(signing.secret_key, secret_key, 32);
+signing.flags = MAVLINK_SIGNING_FLAG_SIGN_OUTGOING;
+signing.link_id = 0;
+signing.timestamp = (현재 마이크로초);
+
+mavlink_status_t *status = mavlink_get_channel_status(MAVLINK_COMM_0);
+status->signing = &signing;
+status->signing_streams = &signing_streams;
+```
+
+### 서명 패킷 구조 (서명 시 +13바이트)
+```
+헤더(10) | PAYLOAD | CK_A CK_B | link_id(1) | timestamp(6) | signature(6)
+```
+- `incompat_flags`에 `0x01` 자동 세팅
+- 서명 = SHA-256(secret_key + header + payload + CRC + link_id + timestamp)의 앞 6바이트
+
+---
+
+## 구현 현황
+
+### 완료
+- [x] HEARTBEAT 기반 UDP 서버-클라이언트 구현 (`server.c`, `client.c`, `Makefile`)
+- [x] Wireshark 패킷 캡쳐 확인 (WSL → tcpdump → .pcap → Windows Wireshark)
+- [x] HEARTBEAT 패킷 바이트 검증 완료: `fd0900007b0101000000...5360` (21바이트)
+
+### 빌드 참고
+```makefile
+CFLAGS = -I./c_library_v2-master -Wall -Wno-address-of-packed-member
+```
+- `-Wno-address-of-packed-member`: 라이브러리 내부 packed struct 경고 무시 (MAVLink 프로젝트 공통)
+
+### Wireshark 캡쳐 (WSL 환경)
+```bash
+sudo tcpdump -i lo -w /tmp/mavlink.pcap udp port 14550 &
+# 서버/클라이언트 실행 후
+cp /tmp/mavlink.pcap /mnt/c/Users/$(whoami)/Desktop/mavlink.pcap
+```
+
+---
+
 ## 작업 환경
 - 집 PC / 연구실 PC 이동 작업 중
 - 이 파일을 git으로 관리하여 양쪽 동기화
