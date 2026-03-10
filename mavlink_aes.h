@@ -1,8 +1,6 @@
 #ifndef MAVLINK_AES_H
 #define MAVLINK_AES_H
 
-#include <cstddef>
-#include <cstdint>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/types.h>
